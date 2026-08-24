@@ -1,0 +1,25 @@
+Version 1.6 Changelog
+
+1. Multi-Profile Management System
+   - Replaced static single-file save state with dynamic ProfileManager.
+   - Added runtime support to create, select, delete, and switch between separate profile JSON storage files in ~/.morse_trainer/.
+
+2. Head Copy Trainer Mode
+   - Added interactive training mode ([8]) playing target character sidetones via Open CW Keyer serial.
+   - Implemented non-blocking single-keystroke terminal input handling (tty.setcbreak / select) without requiring the Enter key.
+   - Implemented a 3-phase challenge display loop:
+     * Phase A: 5-second window for direct audio recognition.
+     * Phase B: Automatic display of spaced dotrep if audio recognition fails.
+     * Phase C: Final reveal of plain text character before auto-advancing.
+
+3. Session-Based Progression & Relaxed Mastery Threshold
+   - Lowered proficiency/mastery threshold from 80%/85% down to 70% accuracy across active pools.
+   - Shifted progression evaluation logic from global lifetime metrics to current session performance metrics to accelerate advancement.
+
+4. High-Contrast Terminal UI & Spacing Overhaul
+   - Replaced low-contrast ASCII dots and dashes in dotreps with high-visibility bold Unicode geometric symbols (● for dits, ━━ for dahs).
+   - Added explicit intra-element spacing (1 space between dits/dahs) and inter-character spacing (3 spaces between letters) to prevent terminal font ligature merging.
+   - Integrated operator name, callsign (M7KQX), and personal website (https://www.m7kqx.co.uk) into application banners and startup screens.
+
+5. Robust Packaging & Cross-Platform Compliance
+   - Maintained PyInstaller compliance via dynamic home path resolution (Path.home()) and modular bytecode-compiled word banks (word_banks.py).
