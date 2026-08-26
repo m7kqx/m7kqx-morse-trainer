@@ -1,5 +1,5 @@
-# M7KQX Morse Trainer v1.5 - Alpha Test
-Password for zip file is "nosadhams"
+# M7KQX Morse Trainer v1.6 - Alpha Test
+
 ## Hardware Requirements
 This trainer is built specifically to interface with the **Open CW Keyer (K3NG firmware)**. 
 
