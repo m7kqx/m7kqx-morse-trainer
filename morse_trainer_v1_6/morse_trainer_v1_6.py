@@ -34,21 +34,43 @@ class ResponseLog:
 
 
 def find_serial_port() -> Optional[str]:
-    for port in serial.tools.list_ports.comports():
+    # Grab all active ports
+    ports = list(serial.tools.list_ports.comports())
+    candidates = []
+
+    # Filter for standard USB-serial chips and Mac/Linux naming conventions
+    for port in ports:
         desc = (port.description or "").lower()
         hwid = (port.hwid or "").lower()
-        if any(dev in desc or dev in hwid for dev in ["ftdi", "ch340", "cp210", "pico", "uart", "usb serial"]):
-            return port.device
+        
+        if any(dev in desc or dev in hwid for dev in ["ftdi", "ch340", "cp210", "pico", "uart", "usb serial"]) \
+           or "usbserial" in port.device.lower() \
+           or "usbmodem" in port.device.lower() \
+           or "ttyusb" in port.device.lower():
+            candidates.append(port)
 
-    linux_ports = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
-    if linux_ports:
-        return linux_ports[0]
+    # Scenario A: No ports found
+    if not candidates:
+        print("No USB serial devices found. Is it plugged in?")
+        return None
 
-    mac_ports = sorted(glob.glob("/dev/cu.usbserial*") + glob.glob("/dev/cu.usbmodem*"))
-    if mac_ports:
-        return mac_ports[0]
+    # Scenario B: Exactly one port found (Happy path!)
+    if len(candidates) == 1:
+        return candidates[0].device
 
-    return None
+    # Scenario C: Multiple ports found (Let the user choose)
+    print("\nMultiple serial devices detected. Please choose one:")
+    for i, port in enumerate(candidates):
+        print(f"  [{i + 1}] {port.device} - {port.description}")
+    
+    while True:
+        try:
+            choice = int(input(f"Select a port (1-{len(candidates)}): "))
+            if 1 <= choice <= len(candidates):
+                return candidates[choice - 1].device
+            print("Invalid selection. Try again.")
+        except ValueError:
+            print("Please enter a number.")
 
 
 def get_dotrep(plain_text: str) -> str:
@@ -168,8 +190,8 @@ class MorseTrainerCLI:
         print(f" Profile: {self.profile_mgr.profile_name:<10} | Mode: {state.training_mode:<10} | WPM: {state.char_wpm}/{state.effective_wpm}")
         print("=" * 68)
         print("┌" + "─" * 66 + "┐")
-        print("│  ACTIVE CHALLENGE:                                               │")
-        print("│                                                                  │")
+        print("│  ACTIVE CHALLENGE:                                                 │")
+        print("│                                                                    │")
 
         if feedback_state == "OK":
             line1 = f"\033[1;92m✓  CORRECT ({feedback_latency:.0f} ms)\033[0m"
@@ -185,9 +207,9 @@ class MorseTrainerCLI:
         if meaning_str and not feedback_state and not hide_challenge:
             print(pad_box_line(f"\033[37m{meaning_str}\033[0m"))
         else:
-            print("│                                                                  │")
+            print("│                                                                    │")
 
-        print("│                                                                  │")
+        print("│                                                                    │")
         print(f"│  Session Acc: {acc_str:<5}  Avg Latency: {lat_str:<7} Awaiting Input...        │")
         print("└" + "─" * 66 + "┘")
 
@@ -449,7 +471,7 @@ class MorseTrainerCLI:
 
         if not self.init_serial():
             print("\033[91mError: Open CW Keyer serial port not detected.\033[0m")
-            print("Verify USB connection and check permissions (`sudo usermod -a -G dialout $USER`).")
+            print("Verify USB connection (and check permissions if on Linux).")
             time.sleep(2)
 
         while self.running:
