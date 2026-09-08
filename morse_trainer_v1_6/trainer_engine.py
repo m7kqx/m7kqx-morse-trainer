@@ -6,6 +6,8 @@ Koch progression, Dotrep suppression, and session-based state advancement.
 
 import json
 import glob
+import random
+from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -40,7 +42,6 @@ class TokenMetric:
 
     @property
     def is_proficient(self) -> bool:
-        # Changed mastery threshold to 70%
         return self.attempts >= 5 and self.accuracy >= 70.0
 
 
@@ -69,6 +70,7 @@ class ProfileManager:
         self.profile_name = profile_name
         self.filepath = STORAGE_DIR / f"{self.profile_name}_v1_6.json"
         self.state = self.load_profile()
+        self.session_metrics: Dict[str, TokenMetric] = defaultdict(TokenMetric)
 
     @staticmethod
     def list_profiles() -> List[str]:
@@ -121,6 +123,10 @@ class ProfileManager:
         self.state = TrainerState()
         self.save_profile()
 
+    def start_session(self) -> None:
+        """Initializes a clean metric slate for the current training session."""
+        self.session_metrics.clear()
+
     def get_weak_pool(self, limit: int = 10) -> List[str]:
         struggles = [k for k, v in self.state.metrics.items() if v.attempts > 0]
         struggles.sort(key=lambda x: self.state.metrics[x].accuracy)
@@ -137,7 +143,17 @@ class ProfileManager:
         limit = self.state.pool_limits.get(mode, 4)
         return full_bank[: min(limit, len(full_bank))]
 
+    def get_next_challenge(self, mode: str) -> str:
+        """Returns a weighted random challenge, prioritizing tokens with < 5 attempts this session."""
+        active_pool = self.get_active_pool(mode)
+        needs_practice = [item for item in active_pool if self.session_metrics[item].attempts < 5]
+        
+        if needs_practice and random.random() < 0.75:
+            return random.choice(needs_practice)
+        return random.choice(active_pool)
+
     def record_response(self, plain_text: str, is_correct: bool, latency_ms: float) -> None:
+        # 1. Update Global Profile Metrics
         if plain_text not in self.state.metrics:
             self.state.metrics[plain_text] = TokenMetric()
 
@@ -151,6 +167,14 @@ class ProfileManager:
                 m.best_latency_ms = latency_ms
         else:
             m.streak = 0
+            
+        # 2. Update Local Session Metrics
+        sm = self.session_metrics[plain_text]
+        sm.attempts += 1
+        if is_correct:
+            sm.correct += 1
+            sm.total_latency_ms += latency_ms
+
         self.save_profile()
 
     def should_show_dotrep(self, plain_text: str) -> bool:
@@ -158,13 +182,12 @@ class ProfileManager:
             return True
         return not self.state.metrics[plain_text].is_proficient
 
-    def evaluate_advancement(self, mode: str, session_metrics: Dict[str, TokenMetric]) -> Optional[str]:
+    def evaluate_advancement(self, mode: str) -> Optional[str]:
         """Evaluates progression using strictly the current session's metrics and a 70% threshold."""
         active_pool = self.get_active_pool(mode)
         
         for item in active_pool:
-            metric = session_metrics.get(item)
-            # Requires at least 5 attempts this session and 70% accuracy
+            metric = self.session_metrics.get(item)
             if not metric or metric.attempts < 5 or metric.accuracy < 70.0:
                 return None
 
