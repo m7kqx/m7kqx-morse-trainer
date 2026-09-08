@@ -7,7 +7,6 @@ and spaced high-contrast rendering.
 
 import collections
 import glob
-import random
 import re
 import sys
 import time
@@ -15,12 +14,12 @@ import select
 import termios
 import tty
 from dataclasses import dataclass
-from typing import Deque, Optional, Dict
+from typing import Deque, Optional
 
 import serial
 import serial.tools.list_ports
 
-from trainer_engine import ProfileManager, TokenMetric
+from trainer_engine import ProfileManager
 from word_banks import ITU_MORSE_MAP, get_meaning
 
 
@@ -34,11 +33,9 @@ class ResponseLog:
 
 
 def find_serial_port() -> Optional[str]:
-    # Grab all active ports
     ports = list(serial.tools.list_ports.comports())
     candidates = []
 
-    # Filter for standard USB-serial chips and Mac/Linux naming conventions
     for port in ports:
         desc = (port.description or "").lower()
         hwid = (port.hwid or "").lower()
@@ -49,16 +46,13 @@ def find_serial_port() -> Optional[str]:
            or "ttyusb" in port.device.lower():
             candidates.append(port)
 
-    # Scenario A: No ports found
     if not candidates:
         print("No USB serial devices found. Is it plugged in?")
         return None
 
-    # Scenario B: Exactly one port found (Happy path!)
     if len(candidates) == 1:
         return candidates[0].device
 
-    # Scenario C: Multiple ports found (Let the user choose)
     print("\nMultiple serial devices detected. Please choose one:")
     for i, port in enumerate(candidates):
         print(f"  [{i + 1}] {port.device} - {port.description}")
@@ -73,27 +67,37 @@ def find_serial_port() -> Optional[str]:
             print("Please enter a number.")
 
 
+def estimate_playback_time(text: str, wpm: int) -> float:
+    """Estimates playback duration in seconds for a given string at a specific WPM (PARIS standard)."""
+    if wpm <= 0: return 0.0
+    dit_sec = 1.2 / wpm
+    duration = 0.0
+    for char in text:
+        morse = ITU_MORSE_MAP.get(char.upper(), "")
+        if not morse:
+            continue
+        for element in morse:
+            duration += dit_sec if element == "." else (dit_sec * 3.0)
+            duration += dit_sec  # intra-character space
+        duration += (dit_sec * 2.0)  # inter-character space (+2 to make 3 total)
+    return duration
+
+
 def get_dotrep(plain_text: str) -> str:
-    """Formats Morse elements with explicit intra-element and inter-character spacing."""
     char_reps = []
     for char in plain_text:
         raw_morse = ITU_MORSE_MAP.get(char.upper(), "")
         if raw_morse:
-            # Space out individual dits and dahs to avoid font ligature merging
             spaced_elements = " ".join(raw_morse)
-            # Replace standard ascii with high-contrast bold unicode shapes
             spaced_elements = spaced_elements.replace(".", "●").replace("-", "━━")
             char_reps.append(spaced_elements)
-    # 3 spaces between separate letters
     return "   ".join(char_reps)
 
 
 def get_char_non_blocking(timeout: float) -> Optional[str]:
-    """Reads a single keystroke from the terminal without requiring Enter."""
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
-        # cbreak allows Ctrl+C to trigger KeyboardInterrupt naturally
         tty.setcbreak(fd)
         r, _, _ = select.select([sys.stdin], [], [], timeout)
         if r:
@@ -104,7 +108,6 @@ def get_char_non_blocking(timeout: float) -> Optional[str]:
 
 
 def flush_stdin():
-    """Clears the input buffer to prevent bleed-over between challenges."""
     termios.tcflush(sys.stdin, termios.TCIFLUSH)
 
 
@@ -126,7 +129,6 @@ class MorseTrainerCLI:
         self.serial_conn: Optional[serial.Serial] = None
         self.running = True
         self.history: Deque[ResponseLog] = collections.deque(maxlen=3)
-        self.session_metrics: Dict[str, TokenMetric] = collections.defaultdict(TokenMetric)
 
     def init_serial(self) -> bool:
         port_path = find_serial_port()
@@ -143,9 +145,21 @@ class MorseTrainerCLI:
             )
             time.sleep(1.5)
             self.serial_conn.reset_input_buffer()
+            self.sync_keyer_speed()
             return True
         except Exception:
             return False
+
+    def sync_keyer_speed(self) -> None:
+        """Sends WPM and Farnsworth configuration to the K3NG CLI via serial."""
+        if self.serial_conn and self.serial_conn.is_open:
+            cw = self.profile_mgr.state.char_wpm
+            ew = self.profile_mgr.state.effective_wpm
+            # Standard K3NG serial CLI speed commands
+            cmd = f"\\w{cw}\n\\f{ew}\n"
+            self.serial_conn.write(cmd.encode('ascii'))
+            time.sleep(0.1)
+            self.serial_conn.reset_input_buffer()
 
     def read_paddle_response(self, challenge: str) -> str:
         if not self.serial_conn:
@@ -180,7 +194,7 @@ class MorseTrainerCLI:
         meaning = get_meaning(challenge)
         meaning_str = f"Meaning: {meaning}" if meaning else ""
 
-        metric = self.session_metrics.get(challenge)
+        metric = self.profile_mgr.session_metrics.get(challenge)
         acc_str = f"{metric.accuracy:.0f}%" if metric and metric.attempts > 0 else "--%"
         lat_str = f"{metric.avg_latency_ms:.0f}ms" if metric and metric.correct > 0 else "--ms"
 
@@ -195,6 +209,9 @@ class MorseTrainerCLI:
 
         if feedback_state == "OK":
             line1 = f"\033[1;92m✓  CORRECT ({feedback_latency:.0f} ms)\033[0m"
+            print(pad_box_line(line1))
+        elif feedback_state == "OK_P2":
+            line1 = f"\033[1;93m✓  RECOGNIZED (Second Attempt)\033[0m"
             print(pad_box_line(line1))
         elif feedback_state == "FAIL":
             line1 = f"\033[1;91m✗  INCORRECT  (Expected: {get_dotrep(challenge)})\033[0m"
@@ -228,6 +245,9 @@ class MorseTrainerCLI:
                 if item.status == "OK":
                     tag = "\033[92m[  OK  ]\033[0m"
                     detail = f"{item.latency_ms:.0f} ms"
+                elif item.status == "OK_P2":
+                    tag = "\033[93m[ LATE ]\033[0m"
+                    detail = f"Second Attempt Success"
                 else:
                     tag = "\033[91m[ FAIL ]\033[0m"
                     detail = f"Got: '{item.response}' | Expected: {item.expected_dotrep}"
@@ -238,20 +258,28 @@ class MorseTrainerCLI:
                 print("  ---")
 
         print("-" * 68)
-        print(" [Ctrl+C] Return to Main Menu")
+        print(" [Ctrl+C] Finish Session")
         sys.stdout.flush()
 
-    def update_session_metric(self, challenge: str, is_correct: bool, latency_ms: float) -> None:
-        m = self.session_metrics[challenge]
-        m.attempts += 1
-        if is_correct:
-            m.correct += 1
-            m.total_latency_ms += latency_ms
+    def render_session_summary(self, session_correct: int, session_attempts: int) -> None:
+        sys.stdout.write("\033[2J\033[H")
+        print("=" * 68)
+        print(" SESSION COMPLETE")
+        print("=" * 68)
+        sesh_acc = (session_correct / session_attempts * 100.0) if session_attempts > 0 else 0.0
+        print(f" Session Accuracy: {sesh_acc:.1f}% ({session_correct}/{session_attempts})")
+        
+        total_att = sum(m.attempts for m in self.profile_mgr.state.metrics.values())
+        total_cor = sum(m.correct for m in self.profile_mgr.state.metrics.values())
+        overall_acc = (total_cor / total_att * 100.0) if total_att > 0 else 0.0
+        print(f" Lifetime Accuracy: {overall_acc:.1f}%")
+        print("-" * 68)
+        input(" Press [Enter] to return to the Main Menu...")
 
     def run_head_copy_session(self) -> None:
         state = self.profile_mgr.state
+        self.profile_mgr.start_session()
         self.history.clear()
-        self.session_metrics.clear()
         advance_msg = ""
         
         session_attempts = 0
@@ -262,19 +290,21 @@ class MorseTrainerCLI:
                 if state.session_length > 0 and session_attempts >= state.session_length:
                     break
 
-                active_pool = self.profile_mgr.get_active_pool(state.training_mode)
-                challenge = random.choice(active_pool)
+                challenge = self.profile_mgr.get_next_challenge(state.training_mode)
                 expected_dot = get_dotrep(challenge)
 
                 self.render_screen(challenge, advance_msg=advance_msg, hide_challenge=True, force_dotrep=False)
                 advance_msg = ""
                 flush_stdin()
 
+                playback_delay = estimate_playback_time(challenge, state.effective_wpm)
+
                 if self.serial_conn:
                     self.serial_conn.reset_input_buffer()
                     self.serial_conn.write(challenge.encode('ascii'))
 
-                t_start = time.perf_counter()
+                # Offset start time so we calculate latency after the character finishes playing
+                t_start = time.perf_counter() + playback_delay
                 
                 t_elapsed = 0.0
                 response_char = None
@@ -284,23 +314,21 @@ class MorseTrainerCLI:
                         break
                     t_elapsed = time.perf_counter() - t_start
 
-                latency_ms = (time.perf_counter() - t_start) * 1000.0
+                latency_ms = max(1.0, (time.perf_counter() - t_start) * 1000.0)
                 session_attempts += 1
 
                 if response_char and response_char.upper() == challenge:
                     session_correct += 1
                     self.profile_mgr.record_response(challenge, True, latency_ms)
-                    self.update_session_metric(challenge, True, latency_ms)
                     self.history.appendleft(ResponseLog(challenge, response_char.upper(), "OK", latency_ms, expected_dot))
                     self.render_screen(challenge, feedback_state="OK", feedback_latency=latency_ms)
                     time.sleep(0.8)
                 else:
                     self.profile_mgr.record_response(challenge, False, latency_ms)
-                    self.update_session_metric(challenge, False, latency_ms)
                     actual_resp = response_char.upper() if response_char else "TIMEOUT"
-                    self.history.appendleft(ResponseLog(challenge, actual_resp, "FAIL", latency_ms, expected_dot))
-
+                    
                     self.render_screen(challenge, advance_msg=advance_msg, hide_challenge=True, force_dotrep=True)
+                    
                     t_start_p2 = time.perf_counter()
                     p2_elapsed = 0.0
                     p2_response = None
@@ -311,24 +339,30 @@ class MorseTrainerCLI:
                         p2_elapsed = time.perf_counter() - t_start_p2
                     
                     if p2_response and p2_response.upper() == challenge:
-                        pass
+                        self.history.appendleft(ResponseLog(challenge, actual_resp, "OK_P2", latency_ms, expected_dot))
+                        self.render_screen(challenge, feedback_state="OK_P2")
+                        time.sleep(0.8)
                     else:
+                        self.history.appendleft(ResponseLog(challenge, actual_resp, "FAIL", latency_ms, expected_dot))
                         self.render_screen(challenge, advance_msg=advance_msg, hide_challenge=False, force_dotrep=True)
                         flush_stdin()
                         time.sleep(3.0)
                         flush_stdin()
 
-                unlocked = self.profile_mgr.evaluate_advancement(state.training_mode, self.session_metrics)
+                unlocked = self.profile_mgr.evaluate_advancement(state.training_mode)
                 if unlocked:
                     advance_msg = f"UNLOCKED: {unlocked}"
 
         except KeyboardInterrupt:
             time.sleep(0.4)
+        finally:
+            if session_attempts > 0:
+                self.render_session_summary(session_correct, session_attempts)
 
     def run_training_session(self) -> None:
         state = self.profile_mgr.state
+        self.profile_mgr.start_session()
         self.history.clear()
-        self.session_metrics.clear()
         advance_msg = ""
         
         session_attempts = 0
@@ -339,8 +373,7 @@ class MorseTrainerCLI:
                 if state.session_length > 0 and session_attempts >= state.session_length:
                     break
 
-                active_pool = self.profile_mgr.get_active_pool(state.training_mode)
-                challenge = random.choice(active_pool)
+                challenge = self.profile_mgr.get_next_challenge(state.training_mode)
                 expected_dot = get_dotrep(challenge)
 
                 self.render_screen(challenge, feedback_state=None, advance_msg=advance_msg)
@@ -350,7 +383,6 @@ class MorseTrainerCLI:
                     self.serial_conn.reset_input_buffer()
 
                 t_start = time.perf_counter()
-                
                 response = self.read_paddle_response(challenge)
                 latency_ms = (time.perf_counter() - t_start) * 1000.0
 
@@ -359,38 +391,25 @@ class MorseTrainerCLI:
                 if response == challenge:
                     session_correct += 1
                     self.profile_mgr.record_response(challenge, True, latency_ms)
-                    self.update_session_metric(challenge, True, latency_ms)
                     self.history.appendleft(ResponseLog(challenge, response, "OK", latency_ms, expected_dot))
                     self.render_screen(challenge, feedback_state="OK", feedback_latency=latency_ms)
                 else:
                     self.profile_mgr.record_response(challenge, False, latency_ms)
-                    self.update_session_metric(challenge, False, latency_ms)
                     self.history.appendleft(ResponseLog(challenge, response, "FAIL", latency_ms, expected_dot))
                     self.render_screen(challenge, feedback_state="FAIL", feedback_latency=latency_ms)
 
                 time.sleep(0.8)
 
                 if state.training_mode != "WEAK":
-                    unlocked = self.profile_mgr.evaluate_advancement(state.training_mode, self.session_metrics)
+                    unlocked = self.profile_mgr.evaluate_advancement(state.training_mode)
                     if unlocked:
                         advance_msg = f"UNLOCKED: {unlocked}"
 
-            sys.stdout.write("\033[2J\033[H")
-            print("=" * 68)
-            print(" SESSION COMPLETE")
-            print("=" * 68)
-            sesh_acc = (session_correct / session_attempts * 100.0) if session_attempts > 0 else 0.0
-            print(f" Session Accuracy: {sesh_acc:.1f}% ({session_correct}/{session_attempts})")
-            
-            total_att = sum(m.attempts for m in state.metrics.values())
-            total_cor = sum(m.correct for m in state.metrics.values())
-            overall_acc = (total_cor / total_att * 100.0) if total_att > 0 else 0.0
-            print(f" Lifetime Accuracy: {overall_acc:.1f}%")
-            print("-" * 68)
-            input(" Press [Enter] to return to the Main Menu...")
-
         except KeyboardInterrupt:
             time.sleep(0.4)
+        finally:
+            if session_attempts > 0:
+                self.render_session_summary(session_correct, session_attempts)
 
     def profile_selection_menu(self) -> None:
         while True:
@@ -505,6 +524,7 @@ class MorseTrainerCLI:
                     self.profile_mgr.state.char_wpm = max(5, cw)
                     self.profile_mgr.state.effective_wpm = min(max(5, ew), cw)
                     self.profile_mgr.save_profile()
+                    self.sync_keyer_speed()
                 except ValueError:
                     pass
             elif choice == "P":
