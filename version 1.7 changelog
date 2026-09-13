@@ -1,3 +1,9 @@
+Version 1.7 Changelog
+
+1. Fixed progression logic to prevent stalling at level 9 on Koch single letter training.
+2. Misc. bug fixes.
+
+
 Version 1.6 Changelog
 
 1. Multi-Profile Management System
