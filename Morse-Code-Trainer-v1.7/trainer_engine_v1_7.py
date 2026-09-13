@@ -200,21 +200,33 @@ class ProfileManager:
         return not self.state.metrics[plain_text].is_proficient
 
     def evaluate_advancement(self, mode: str) -> Optional[str]:
-        active_pool = self.get_active_pool(mode)
-        
-        for item in active_pool:
-            metric = self.session_metrics.get(item)
-            if not metric or metric.attempts < 5 or metric.accuracy < 70.0:
-                return None
-
         if mode in ("KOCH", "HEAD_COPY"):
-            if self.state.koch_level < len(KOCH_SEQUENCE):
+            # Check if we are already at max level
+            if self.state.koch_level >= len(KOCH_SEQUENCE):
+                return None
+            
+            # Target the most recently introduced letter
+            current_target = KOCH_SEQUENCE[self.state.koch_level - 1]
+            metric = self.state.metrics.get(current_target)
+            
+            # Advance as soon as the latest letter is learned!
+            if metric and metric.attempts >= 5 and metric.accuracy >= 70.0:
                 self.state.koch_level += 1
                 self.save_profile()
-                return f"Koch Level {self.state.koch_level} (+ '{KOCH_SEQUENCE[self.state.koch_level - 1]}')"
+                new_letter = KOCH_SEQUENCE[self.state.koch_level - 1]
+                return f"Koch Level {self.state.koch_level} (+ '{new_letter}')"
+            return None
+
         else:
             full_bank = get_bank(mode)
             current_limit = self.state.pool_limits.get(mode, 4)
+            active_pool = self.get_active_pool(mode)
+            
+            for item in active_pool:
+                metric = self.state.metrics.get(item)
+                if not metric or metric.attempts < 5 or metric.accuracy < 70.0:
+                    return None
+
             if current_limit < len(full_bank):
                 new_limit = min(current_limit + 2, len(full_bank))
                 self.state.pool_limits[mode] = new_limit
